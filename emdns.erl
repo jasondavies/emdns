@@ -48,10 +48,7 @@ get_timestamp() ->
     (Mega * 1000000 + Sec) * 1000000 + Micro.
 
 start() ->
-    % start the process listening for mdns messages
-    %BindAddress = ,
-    %Intf = ,
-    %Group = {"", ?MDNS_PORT},
+    % Start the process listening for mdns messages
     LAddr = {127, 0, 0, 1},
     {ok, Socket} = gen_udp:open(?MDNS_PORT, [
         {reuseaddr, true},
@@ -120,8 +117,8 @@ register_service(Pid, Domain, Name, Addr, Port, Weight, Priority, Props) ->
             {ok, Reg}
     end.
 
-process_reg(State, {Domain, Name, Addr, Port, Weight, Priority, Props}) ->
-    State.
+process_reg(#state{services=Services}=State, Service) ->
+    State#state{services=[Service|Services]}.
 
 process_queries(_S,[]) -> ok;
 process_queries(S,Queries) ->
@@ -135,7 +132,7 @@ process_queries(S,Queries) ->
     [process_query(S, Queries, Q) || Q <- Queries, lists:member(Q#dns_query.domain,Reg)].
 
 % Special case: http://developer.apple.com/mac/library/qa/qa2004/qa1337.html
-process_query(S, Queries, #dns_query{domain="_services._dns-sd._udp.local"}) ->
+process_query(S, _Queries, #dns_query{domain="_services._dns-sd._udp.local"}) ->
     Rec = #dns_rec{
         header=#dns_header{qr=1, aa=1},
         anlist=[
@@ -149,14 +146,13 @@ process_query(S, Queries, #dns_query{domain="_services._dns-sd._udp.local"}) ->
         qdlist=[]
     },
     gen_udp:send(S, ?MDNS_ADDR, ?MDNS_PORT, inet_dns:encode(Rec));
-process_query(S, Queries, Query) ->
+process_query(S, _Queries, Query) ->
     io:format("Registered Query: ~p~n",[Query]),
     Ttl=?DNS_TTL,
     H = #dns_header{qr=1,aa=1},
     D = "CouchDB._http._tcp.local",
     R = #dns_rr{domain="_http._tcp.local",type=ptr,ttl=Ttl,data=D},
     Rec = #dns_rec{header=H,anlist=[R],qdlist=[]},%Queries},
-    LAddr = {127, 0, 0, 1},
     %{ok, S} = gen_udp:open(?MDNS_PORT, [
         %{active, false},
     %    {reuseaddr, true},
