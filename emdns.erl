@@ -197,7 +197,7 @@ process_query(Services, #dns_query{type=txt, domain=Name}, #dns_rec{anlist=Answe
                 domain=Name,
                 type=txt,
                 ttl=?DNS_TTL,
-                data=["TESTTXT"]
+                data=["TESTTXT JASON"]
             } | Answers]};
         _ -> Out
     end;
@@ -265,10 +265,10 @@ process_response(true, #dns_rr{domain = Domain, type = Type, class = Class} = Re
     NewRR = Response#dns_rr{tm=get_timestamp()},
     dict:store({Domain,Type,Class},NewRR,Val).
 
+%% Normalize single boolean key value entries
+%% make "key" == "key=true"
+%% make "key=" == "key=[]"
 normalize_kv(T) ->
-    %% normalize single boolean key value entries
-    %% make "key" == "key=true"
-    %% make "key=" == "key=[]"
     case re:split(T,"=",[{return,list}]) of
         [K] -> {K,true};
         [K,V] -> {K,V}
