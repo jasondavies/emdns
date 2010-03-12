@@ -23,7 +23,8 @@
 -record(state, {
     subscriptions=[],
     services=[],
-    answers=[]
+    answers=[],
+    socket
     }).
 
 %% Gets a timestamp in milliseconds.
@@ -48,6 +49,7 @@ start() ->
     ]),
     Pid = spawn(?MODULE, receiver, [#state{subscriptions=dict:new()}]),
     gen_udp:controlling_process(Socket, Pid),
+    set_socket(Pid, Socket),
     {Socket, Pid}.
 
 %% Stops the process listening for mDNS messages.
@@ -69,15 +71,22 @@ getsubscriptions(Pid) ->
             {ok, Sub}
     end.
 
+set_socket(Pid, Socket) ->
+    Pid ! {setsock, Socket}.
+
 %% Main process loop.
 receiver(#state{subscriptions=Sub}=State) ->
     receive
-        {udp, Socket, _IP, InPortNo, Packet} ->
-            io:format("INPORT: ~p~n", [InPortNo]),
+        {setsock, Socket} ->
+            io:format("woo~n"),
+            receiver(State#state{socket=Socket});
+        {udp, Socket, _IP, _InPortNo, Packet} ->
             NewState = process_dnsrec(State, Socket, inet_dns:decode(Packet)),
             receiver(NewState);
         {reg, Pid, Service} ->
-            NewState = process_reg(State, Service),
+            NewState0 = process_reg(State, Service),
+            Queries = [#dns_query{type=ptr, domain="_services._dns-sd._udp.local"}],
+            NewState = process_dnsrec(NewState0, NewState0#state.socket, {ok, #dns_rec{qdlist=Queries}}),
             Pid ! {ok, NewState#state.services},
             receiver(NewState);
         {sub, Domain} ->
@@ -89,23 +98,20 @@ receiver(#state{subscriptions=Sub}=State) ->
             receiver(State);
         stop ->
             true;
-        AnythingElse ->
-            io:format("RECEIVED: ~p~n", [AnythingElse]),
+        _AnythingElse ->
             receiver(State)
    end.
 
-process_dnsrec(State, _Socket, {error, E}) ->
-    io:format("Error: ~p~n", [E]),
+process_dnsrec(State, _Socket, {error, _E}) ->
     State;
 process_dnsrec(#state{subscriptions=Sub, services=Services}=State, Socket, {ok, #dns_rec{qdlist=Queries, anlist=Responses}}) ->
     case process_queries(Services, Queries) of
         ok -> ok;
         #dns_rec{anlist=Answers}=Out ->
-            io:format("SENDING: ~p~n",[Out]),
             Out1 = Out#dns_rec{anlist=lists:reverse(Answers)},
             gen_udp:send(Socket, ?MDNS_ADDR, ?MDNS_PORT, inet_dns:encode(Out1))
     end,
-    State#state{subscriptions=dict:map(fun(X, V) -> process_responses(X, V, Responses) end, Sub)}.
+    State#state{subscriptions=dict:map(fun(K, V) -> process_responses(K, V, Responses) end, Sub)}.
 
 register_service(Pid, #service{}=Service) ->
     Pid ! {reg, self(), Service},
@@ -119,7 +125,6 @@ process_reg(#state{services=Services}=State, Service) ->
 
 process_queries(_Services, []) -> ok;
 process_queries(Services, Queries) ->
-    io:format("Queries: ~p~n",[Queries]),
     _Reg = ["_services._dns-sd._udp.local", "_http._tcp.local"],
     %lists:foreach(fun(Q) -> case lists:member(Q#dns_query.domain,Reg) of
     %                            true -> io:format("HIT: ~p~n",[Q]);
@@ -147,9 +152,9 @@ process_query(Services, #dns_query{type=ptr, domain="_services._dns-sd._udp.loca
                 ttl=?DNS_TTL,
                 data=Type
             } | Answers]
-        }%,
-        %Out2 = process_query(Services, Query#dns_query{type=srv, domain=Name}, Out1),
-        %process_query(Services, Query#dns_query{type=txt, domain=Name}, Out2)
+        },
+        Out2 = process_query(Services, Query#dns_query{type=srv, domain=Name}, Out1),
+        process_query(Services, Query#dns_query{type=txt, domain=Name}, Out2)
     end, Out, Services);
 process_query(Services, #dns_query{type=ptr, domain=Name}, #dns_rec{anlist=Answers}=Out) ->
     Out#dns_rec{anlist=lists:foldl(fun (#service{name=ServiceName}, Acc) -> [#dns_rr{
@@ -191,7 +196,7 @@ process_query(Services, #dns_query{type=srv, domain=Name}, #dns_rec{anlist=Answe
 process_query(Services, #dns_query{type=txt, domain=Name}, #dns_rec{anlist=Answers}=Out) ->
     case get_service(Services, string:to_lower(Name)) of
         #service{
-            properties=Properties
+            properties=_Properties
         } ->
             Out#dns_rec{anlist=[#dns_rr{
                 domain=Name,
@@ -247,29 +252,28 @@ get_service([], _Name) -> undefined.
 %    gen_udp:send(S, ?MDNS_ADDR, ?MDNS_PORT, inet_dns:encode(Rec1)).
     %gen_udp:close(S).
 
+find_service([], Service) -> Service;
+find_service([Service|Services], Service) -> Service.
 
-process_responses(S, Value, Responses) ->
-    io:format("Responses ~p~n",[Responses]),
-    lists:foldl(fun(#dns_rr{domain = Domain} = Response, Val) ->
-        process_response(lists:suffix(S, Domain), Response, Val) end, Value, Responses).
+process_response(#dns_rr{domain=Server, type=a, data=Address}=Response, Services) ->
+    dict:map(fun (_Key, #service{server=Server0}=Service) when Server == Server0-> Service#service{address=Address};
+                 (_Key, Service) -> Service end, Services);
+process_response(#dns_rr{domain=Name, type=srv, data={Prio, Weight, Port, Server}}=Response, Services) ->
+    F = fun (Service) -> Service#service{
+        name=Name,
+        priority=Prio,
+        weight=Weight,
+        port=Port,
+        server=Server
+    } end,
+    dict:update(Name, F, F(#service{}), Services);
+process_response(#dns_rr{domain=Type, type=ptr, data=Name}=Response, Services) ->
+    F = fun (Service) -> Service#service{
+        name=Name,
+        type=Type
+    } end,
+    dict:update(Name, F, F(#service{}), Services);
+process_response(_Else, Services) -> Services.
 
-process_response(false, _Response, Val) -> Val;
-process_response(true, #dns_rr{ttl=TTL} = _Response, _Val) when TTL == 0 ->
-    %% the server left and lets us know this because TTL == Zero
-    dict:new();
-process_response(true, #dns_rr{domain = Domain, type = Type, class = Class} = Response, Val) when Type == txt ->
-    DTXT = lists:foldl(fun(T,D) -> {K,V} = normalize_kv(T),dict:store(K,V,D) end,dict:new(),Response#dns_rr.data),
-    NewRR = Response#dns_rr{tm=get_timestamp(),data=DTXT},
-    dict:store({Domain,Type,Class},NewRR,Val);
-process_response(true, #dns_rr{domain = Domain, type = Type, class = Class} = Response, Val) ->
-    NewRR = Response#dns_rr{tm=get_timestamp()},
-    dict:store({Domain,Type,Class},NewRR,Val).
-
-%% Normalize single boolean key value entries
-%% make "key" == "key=true"
-%% make "key=" == "key=[]"
-normalize_kv(T) ->
-    case re:split(T,"=",[{return,list}]) of
-        [K] -> {K,true};
-        [K,V] -> {K,V}
-    end.
+process_responses(_Domain, Services, Responses) ->
+    lists:foldl(fun(R, Acc) -> process_response(R, Acc) end, Services, Responses).
