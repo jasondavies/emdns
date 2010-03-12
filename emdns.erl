@@ -104,14 +104,15 @@ receiver(#state{subscriptions=Sub}=State) ->
 
 process_dnsrec(State, _Socket, {error, _E}) ->
     State;
-process_dnsrec(#state{subscriptions=Sub, services=Services}=State, Socket, {ok, #dns_rec{qdlist=Queries, anlist=Responses}}) ->
+process_dnsrec(#state{subscriptions=Sub, services=Services}=State, Socket, {ok, #dns_rec{qdlist=Queries, anlist=Responses, arlist=AResponses}}) ->
     case process_queries(Services, Queries) of
         ok -> ok;
         #dns_rec{anlist=Answers}=Out ->
             Out1 = Out#dns_rec{anlist=lists:reverse(Answers)},
             gen_udp:send(Socket, ?MDNS_ADDR, ?MDNS_PORT, inet_dns:encode(Out1))
     end,
-    State#state{subscriptions=dict:map(fun(K, V) -> process_responses(K, V, Responses) end, Sub)}.
+    AllResponses = Responses ++ AResponses,
+    State#state{subscriptions=dict:map(fun(K, V) -> process_responses(K, V, AllResponses) end, Sub)}.
 
 register_service(Pid, #service{}=Service) ->
     Pid ! {reg, self(), Service},
@@ -252,13 +253,10 @@ get_service([], _Name) -> undefined.
 %    gen_udp:send(S, ?MDNS_ADDR, ?MDNS_PORT, inet_dns:encode(Rec1)).
     %gen_udp:close(S).
 
-find_service([], Service) -> Service;
-find_service([Service|Services], Service) -> Service.
-
-process_response(#dns_rr{domain=Server, type=a, data=Address}=Response, Services) ->
+process_response(#dns_rr{domain=Server, type=a, data=Address}, Services) ->
     dict:map(fun (_Key, #service{server=Server0}=Service) when Server == Server0-> Service#service{address=Address};
                  (_Key, Service) -> Service end, Services);
-process_response(#dns_rr{domain=Name, type=srv, data={Prio, Weight, Port, Server}}=Response, Services) ->
+process_response(#dns_rr{domain=Name, type=srv, data={Prio, Weight, Port, Server}}, Services) ->
     F = fun (Service) -> Service#service{
         name=Name,
         priority=Prio,
@@ -267,7 +265,7 @@ process_response(#dns_rr{domain=Name, type=srv, data={Prio, Weight, Port, Server
         server=Server
     } end,
     dict:update(Name, F, F(#service{}), Services);
-process_response(#dns_rr{domain=Type, type=ptr, data=Name}=Response, Services) ->
+process_response(#dns_rr{domain=Type, type=ptr, data=Name}, Services) ->
     F = fun (Service) -> Service#service{
         name=Name,
         type=Type
