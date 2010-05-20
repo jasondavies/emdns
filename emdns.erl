@@ -78,18 +78,21 @@ set_socket(Pid, Socket) ->
 receiver(#state{subscriptions=Sub}=State) ->
     receive
         {setsock, Socket} ->
-            io:format("woo~n"),
             receiver(State#state{socket=Socket});
         {udp, Socket, _IP, _InPortNo, Packet} ->
             NewState = process_dnsrec(State, Socket, inet_dns:decode(Packet)),
             receiver(NewState);
         {reg, Pid, Service} ->
             NewState0 = process_reg(State, Service),
-            Queries = [#dns_query{type=ptr, domain="_services._dns-sd._udp.local"}],
-            NewState = process_dnsrec(NewState0, NewState0#state.socket, {ok, #dns_rec{qdlist=Queries}}),
+            Queries = [#dns_query{type=ptr, domain="_services._dns-sd._udp.local", class=in}],
+            Out = #dns_rec{header=#dns_header{}, qdlist=Queries},
+            NewState = process_dnsrec(NewState0, NewState0#state.socket, {ok, Out}),
             Pid ! {ok, NewState#state.services},
             receiver(NewState);
         {sub, Domain} ->
+            Queries = [#dns_query{type=ptr, domain=Domain, class=in}],
+            Out = #dns_rec{header=#dns_header{}, qdlist=Queries},
+            gen_udp:send(State#state.socket, ?MDNS_ADDR, ?MDNS_PORT, inet_dns:encode(Out)),
             receiver(State#state{subscriptions=dict:store(Domain, dict:new(), Sub)});
         {unsub, Domain} ->
             receiver(State#state{subscriptions=dict:erase(Domain, Sub)});
@@ -109,7 +112,8 @@ process_dnsrec(#state{subscriptions=Sub, services=Services}=State, Socket, {ok, 
         ok -> ok;
         #dns_rec{anlist=Answers}=Out ->
             Out1 = Out#dns_rec{anlist=lists:reverse(Answers)},
-            gen_udp:send(Socket, ?MDNS_ADDR, ?MDNS_PORT, inet_dns:encode(Out1))
+            gen_udp:send(Socket, ?MDNS_ADDR, ?MDNS_PORT, inet_dns:encode(Out1));
+        _Else -> noop
     end,
     AllResponses = Responses ++ AResponses,
     State#state{subscriptions=dict:map(fun(K, V) -> process_responses(K, V, AllResponses) end, Sub)}.
